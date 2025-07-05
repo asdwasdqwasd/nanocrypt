@@ -1,18 +1,18 @@
-import sys
 import os
+import sys
+import argparse
 from getpass import getpass
 from base64 import urlsafe_b64encode
 from hashlib import pbkdf2_hmac
 from cryptography.fernet import Fernet
-from prompt_toolkit import PromptSession
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.application import Application
+from prompt_toolkit import Application
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.widgets import TextArea, Frame
 from prompt_toolkit.layout.containers import HSplit
-import argparse
+from prompt_toolkit.widgets import TextArea, Frame
+from prompt_toolkit.key_binding import KeyBindings
 
-# === Encryption utilities ===
+# === Encryption helpers ===
+
 def derive_key(password: str, salt: bytes) -> bytes:
     key = pbkdf2_hmac('sha256', password.encode(), salt, 100_000, dklen=32)
     return urlsafe_b64encode(key)
@@ -20,18 +20,16 @@ def derive_key(password: str, salt: bytes) -> bytes:
 def encrypt(content: bytes, password: str) -> bytes:
     salt = os.urandom(16)
     key = derive_key(password, salt)
-    f = Fernet(key)
-    encrypted = f.encrypt(content)
-    return salt + encrypted
+    return salt + Fernet(key).encrypt(content)
 
 def decrypt(encrypted: bytes, password: str) -> bytes:
     salt = encrypted[:16]
     data = encrypted[16:]
     key = derive_key(password, salt)
-    f = Fernet(key)
-    return f.decrypt(data)
+    return Fernet(key).decrypt(data)
 
-# === Nano-like editor ===
+# === Editor ===
+
 def run_editor(text: str, readonly: bool):
     kb = KeyBindings()
     saved_content = {"text": None}
@@ -47,6 +45,27 @@ def run_editor(text: str, readonly: bool):
     def _(event):
         app.exit()
 
+    @kb.add('tab')
+    def _(event):
+        if not readonly:
+            event.app.current_buffer.insert_text(' ' * 4)
+
+    @kb.add('c-a')
+    def _(event):
+        buf = event.app.current_buffer
+        buf.cursor_position = 0
+        buf.start_selection()
+        buf.cursor_position = len(buf.text)
+
+    @kb.add('left')
+    @kb.add('right')
+    @kb.add('up')
+    @kb.add('down')
+    def _(event):
+        buf = event.app.current_buffer
+        if buf.selection_state:
+            buf.exit_selection()
+
     editor = TextArea(
         text=text,
         scrollbar=True,
@@ -54,24 +73,41 @@ def run_editor(text: str, readonly: bool):
         line_numbers=True,
     )
 
-    frame = Frame(title="Encrypted Nano Editor (Ctrl+S=Save, Ctrl+Q=Quit)", body=editor)
+    # Cancel selection on mouse click
+    original_mouse_handler = editor.control.mouse_handler
 
-    root_container = HSplit([frame])
-    layout = Layout(root_container)
+    def mouse_handler(mouse_event):
+        buf = editor.buffer
+        if buf.selection_state:
+            buf.exit_selection()
+        return original_mouse_handler(mouse_event)
+
+    editor.control.mouse_handler = mouse_handler
+
+
+    frame = Frame(
+        title="Encrypted Nano Editor (Ctrl+S=Save, Ctrl+Q=Quit, Tab=Indent, Ctrl+A=Select All)",
+        body=editor
+    )
+
+    layout = Layout(HSplit([frame]))
 
     app = Application(
         layout=layout,
         key_bindings=kb,
-        full_screen=True
+        full_screen=True,
+        mouse_support=True
     )
     app.run()
 
     return saved_content["text"]
 
+# === Main logic ===
+
 def main():
     parser = argparse.ArgumentParser(description="Cross-platform nano-like encrypted editor")
     parser.add_argument("filename", help="File to open")
-    parser.add_argument("--plaintext", action="store_true", help="Open file as plaintext (encrypt after save)")
+    parser.add_argument("--plaintext", action="store_true", help="Open file as plaintext (encrypt on save)")
     parser.add_argument("--readonly", action="store_true", help="Open in read-only mode")
     parser.add_argument("--changepw", action="store_true", help="Change password on save (encrypted only)")
     args = parser.parse_args()
@@ -113,16 +149,16 @@ def main():
         edited_text = run_editor(initial_text, is_readonly)
         if edited_text is not None and not is_readonly:
             if change_pw:
-                newpw = getpass("Enter new password: ")
-                confpw = getpass("Confirm new password: ")
-                if newpw != confpw:
+                new_pw = getpass("Enter new password: ")
+                confirm_pw = getpass("Confirm new password: ")
+                if new_pw != confirm_pw:
                     print("[!] Passwords do not match.")
                     return
-                password = newpw
+                password = new_pw
             encrypted = encrypt(edited_text.encode(), password)
             with open(filename, "wb") as f:
                 f.write(encrypted)
-            print(f"[+] Saved and encrypted: {filename}")
+            print(f"[+] File saved and encrypted: {filename}")
 
 if __name__ == "__main__":
     main()
